@@ -1,4 +1,6 @@
+import { Suspense } from "react"
 import { SignInForm } from "@/components/auth/sign-in-form"
+import { Skeleton } from "@/components/ui/skeleton"
 
 export const metadata = {
   title: "로그인 - JiraLite",
@@ -6,5 +8,9 @@ export const metadata = {
 }
 
 export default function SignInPage() {
-  return <SignInForm />
+  return (
+    <Suspense fallback={<Skeleton className="h-96 w-full max-w-md" />}>
+      <SignInForm />
+    </Suspense>
+  )
 }
