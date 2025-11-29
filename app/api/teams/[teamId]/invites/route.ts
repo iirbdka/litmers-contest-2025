@@ -3,6 +3,7 @@ import { TeamInvite, TeamInviteForm } from "@/src/schemas/team"
 import { LIMITS } from "@/src/schemas/validators"
 import { requireTeamMembership, requireTeamAdmin } from "@/lib/api/auth"
 import { successResponse, handleApiError, errorResponse } from "@/lib/api/response"
+import { sendTeamInviteEmail } from "@/lib/email"
 
 type RouteParams = { params: Promise<{ teamId: string }> }
 
@@ -43,31 +44,26 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
 export async function POST(req: NextRequest, { params }: RouteParams) {
   try {
     const { teamId } = await params
-    const { supabase } = await requireTeamAdmin(teamId)
+    const { supabase, user } = await requireTeamAdmin(teamId)
     const body = TeamInviteForm.parse(await req.json())
 
-    // Check if email is already a team member
-    const { data: existingMember } = await supabase
-      .from("team_members")
-      .select(`
-        id,
-        user:profiles!inner(id)
-      `)
-      .eq("team_id", teamId)
-      .is("deleted_at", null)
-
-    // Check if user exists with this email
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("id")
-      .eq("id", (await supabase.auth.admin?.listUsers())?.data?.users?.find(
-        (u) => u.email === body.email
-      )?.id || "")
+    // Get team info
+    const { data: team, error: teamError } = await supabase
+      .from("teams")
+      .select("name")
+      .eq("id", teamId)
       .single()
 
-    if (existingMember?.some((m) => (m.user as any)?.id === profile?.id)) {
-      return errorResponse("User is already a team member", 409)
+    if (teamError || !team) {
+      return errorResponse("Team not found", 404)
     }
+
+    // Get inviter's profile
+    const { data: inviterProfile } = await supabase
+      .from("profiles")
+      .select("name")
+      .eq("id", user.id)
+      .single()
 
     // Check for existing pending invite
     const { data: existingInvite } = await supabase
@@ -81,9 +77,11 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const expiresAt = new Date()
     expiresAt.setDate(expiresAt.getDate() + LIMITS.INVITE_EXPIRY_DAYS)
 
+    let invite: any
+
     if (existingInvite) {
       // Update expires_at for resend
-      const { data: invite, error } = await supabase
+      const { data, error } = await supabase
         .from("team_invites")
         .update({ expires_at: expiresAt.toISOString() })
         .eq("id", existingInvite.id)
@@ -91,35 +89,35 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         .single()
 
       if (error) throw error
+      invite = data
+    } else {
+      // Create new invite
+      const { data, error } = await supabase
+        .from("team_invites")
+        .insert({
+          team_id: teamId,
+          email: body.email,
+          expires_at: expiresAt.toISOString(),
+        })
+        .select()
+        .single()
 
-      // TODO: Trigger email send via Edge Function
-
-      const result = TeamInvite.parse({
-        id: invite.id,
-        teamId: invite.team_id,
-        email: invite.email,
-        status: invite.status,
-        expiresAt: invite.expires_at,
-        createdAt: invite.created_at,
-      })
-
-      return successResponse(result)
+      if (error) throw error
+      invite = data
     }
 
-    // Create new invite
-    const { data: invite, error } = await supabase
-      .from("team_invites")
-      .insert({
-        team_id: teamId,
-        email: body.email,
-        expires_at: expiresAt.toISOString(),
+    // Send invite email
+    try {
+      await sendTeamInviteEmail({
+        to: body.email,
+        teamName: team.name,
+        inviterName: inviterProfile?.name || "팀원",
+        inviteId: invite.id,
       })
-      .select()
-      .single()
-
-    if (error) throw error
-
-    // TODO: Trigger email send via Edge Function
+    } catch (emailError) {
+      console.error("Failed to send invite email:", emailError)
+      // Don't fail the request if email fails - the invite is still created
+    }
 
     const result = TeamInvite.parse({
       id: invite.id,
@@ -130,7 +128,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       createdAt: invite.created_at,
     })
 
-    return successResponse(result, 201)
+    return successResponse(result, existingInvite ? 200 : 201)
   } catch (error) {
     return handleApiError(error)
   }
