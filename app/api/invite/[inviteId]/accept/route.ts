@@ -4,13 +4,13 @@ import { successResponse, handleApiError, errorResponse } from "@/lib/api/respon
 
 type RouteParams = { params: Promise<{ inviteId: string }> }
 
-// POST /api/invites/:inviteId/accept - Accept team invite
+// POST /api/invite/:inviteId/accept - Accept invite
 export async function POST(req: NextRequest, { params }: RouteParams) {
   try {
     const { inviteId } = await params
     const { supabase, user } = await requireAuth()
 
-    // Get the invite
+    // Get invite
     const { data: invite, error: inviteError } = await supabase
       .from("team_invites")
       .select("*")
@@ -19,20 +19,20 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       .single()
 
     if (inviteError || !invite) {
-      return errorResponse("초대를 찾을 수 없거나 만료되었습니다", 404)
+      return errorResponse("Invite not found or already used", 404)
     }
 
     // Check if invite is expired
     if (new Date(invite.expires_at) < new Date()) {
-      return errorResponse("초대가 만료되었습니다", 400)
+      return errorResponse("Invite has expired", 410)
     }
 
-    // Check if user email matches invite email
-    if (user.email !== invite.email) {
-      return errorResponse("이 초대는 다른 이메일 주소로 발송되었습니다", 403)
-    }
+    // Check if user email matches invite email (optional - can be removed if any user can accept)
+    // if (user.email !== invite.email) {
+    //   return errorResponse("This invite was sent to a different email address", 403)
+    // }
 
-    // Check if already a team member
+    // Check if user is already a team member
     const { data: existingMember } = await supabase
       .from("team_members")
       .select("id")
@@ -42,13 +42,13 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       .single()
 
     if (existingMember) {
-      // Update invite status anyway
+      // Update invite status to accepted anyway
       await supabase
         .from("team_invites")
         .update({ status: "accepted" })
         .eq("id", inviteId)
 
-      return errorResponse("이미 팀 멤버입니다", 409)
+      return errorResponse("You are already a member of this team", 409)
     }
 
     // Add user to team
@@ -63,16 +63,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     if (memberError) throw memberError
 
     // Update invite status
-    await supabase
+    const { error: updateError } = await supabase
       .from("team_invites")
       .update({ status: "accepted" })
       .eq("id", inviteId)
 
-    return successResponse({ 
-      success: true, 
-      teamId: invite.team_id,
-      message: "팀에 성공적으로 참여했습니다" 
-    })
+    if (updateError) throw updateError
+
+    return successResponse({ success: true, teamId: invite.team_id })
   } catch (error) {
     return handleApiError(error)
   }

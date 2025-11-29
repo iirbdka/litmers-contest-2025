@@ -3,9 +3,53 @@ import { TeamInvite, TeamInviteForm } from "@/src/schemas/team"
 import { LIMITS } from "@/src/schemas/validators"
 import { requireTeamMembership, requireTeamAdmin } from "@/lib/api/auth"
 import { successResponse, handleApiError, errorResponse } from "@/lib/api/response"
-import { sendTeamInviteEmail } from "@/lib/email"
 
 type RouteParams = { params: Promise<{ teamId: string }> }
+
+// Send invite email via Supabase Edge Function
+async function sendInviteEmail(
+  to: string,
+  teamName: string,
+  inviterName: string,
+  inviteId: string
+) {
+  const baseUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000"
+  const inviteUrl = `${baseUrl}/invite/${inviteId}`
+
+  try {
+    const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+    const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
+
+    if (!supabaseUrl || !supabaseAnonKey) {
+      console.warn("Supabase URL or Anon Key not configured")
+      return
+    }
+
+    const response = await fetch(`${supabaseUrl}/functions/v1/send-email`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${supabaseAnonKey}`,
+      },
+      body: JSON.stringify({
+        type: "team_invite",
+        to,
+        data: {
+          teamName,
+          inviterName,
+          inviteUrl,
+        },
+      }),
+    })
+
+    if (!response.ok) {
+      const error = await response.text()
+      console.error("Failed to send invite email:", error)
+    }
+  } catch (error) {
+    console.error("Error sending invite email:", error)
+  }
+}
 
 // GET /api/teams/:teamId/invites - List pending invites
 export async function GET(req: NextRequest, { params }: RouteParams) {
@@ -47,7 +91,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const { supabase, user } = await requireTeamAdmin(teamId)
     const body = TeamInviteForm.parse(await req.json())
 
-    // Get team info
+    // Get team info for email
     const { data: team, error: teamError } = await supabase
       .from("teams")
       .select("name")
@@ -58,12 +102,14 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       return errorResponse("Team not found", 404)
     }
 
-    // Get inviter's profile
+    // Get inviter's name
     const { data: inviterProfile } = await supabase
       .from("profiles")
       .select("name")
       .eq("id", user.id)
       .single()
+
+    const inviterName = inviterProfile?.name || user.email || "팀 관리자"
 
     // Check for existing pending invite
     const { data: existingInvite } = await supabase
@@ -77,11 +123,9 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
     const expiresAt = new Date()
     expiresAt.setDate(expiresAt.getDate() + LIMITS.INVITE_EXPIRY_DAYS)
 
-    let invite: any
-
     if (existingInvite) {
       // Update expires_at for resend
-      const { data, error } = await supabase
+      const { data: invite, error } = await supabase
         .from("team_invites")
         .update({ expires_at: expiresAt.toISOString() })
         .eq("id", existingInvite.id)
@@ -89,35 +133,37 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
         .single()
 
       if (error) throw error
-      invite = data
-    } else {
-      // Create new invite
-      const { data, error } = await supabase
-        .from("team_invites")
-        .insert({
-          team_id: teamId,
-          email: body.email,
-          expires_at: expiresAt.toISOString(),
-        })
-        .select()
-        .single()
 
-      if (error) throw error
-      invite = data
+      // Send invite email
+      await sendInviteEmail(body.email, team.name, inviterName, invite.id)
+
+      const result = TeamInvite.parse({
+        id: invite.id,
+        teamId: invite.team_id,
+        email: invite.email,
+        status: invite.status,
+        expiresAt: invite.expires_at,
+        createdAt: invite.created_at,
+      })
+
+      return successResponse(result)
     }
+
+    // Create new invite
+    const { data: invite, error } = await supabase
+      .from("team_invites")
+      .insert({
+        team_id: teamId,
+        email: body.email,
+        expires_at: expiresAt.toISOString(),
+      })
+      .select()
+      .single()
+
+    if (error) throw error
 
     // Send invite email
-    try {
-      await sendTeamInviteEmail({
-        to: body.email,
-        teamName: team.name,
-        inviterName: inviterProfile?.name || "팀원",
-        inviteId: invite.id,
-      })
-    } catch (emailError) {
-      console.error("Failed to send invite email:", emailError)
-      // Don't fail the request if email fails - the invite is still created
-    }
+    await sendInviteEmail(body.email, team.name, inviterName, invite.id)
 
     const result = TeamInvite.parse({
       id: invite.id,
@@ -128,7 +174,7 @@ export async function POST(req: NextRequest, { params }: RouteParams) {
       createdAt: invite.created_at,
     })
 
-    return successResponse(result, existingInvite ? 200 : 201)
+    return successResponse(result, 201)
   } catch (error) {
     return handleApiError(error)
   }
