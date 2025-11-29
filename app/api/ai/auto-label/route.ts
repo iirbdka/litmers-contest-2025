@@ -4,6 +4,7 @@ import { Label } from "@/src/schemas/project"
 import { requireAuth } from "@/lib/api/auth"
 import { successResponse, handleApiError, errorResponse } from "@/lib/api/response"
 import { checkAIRateLimit } from "../rate-limit"
+import { suggestLabels } from "@/lib/openai"
 
 const AutoLabelBody = z.object({
   projectId: z.string().uuid(),
@@ -60,11 +61,13 @@ export async function POST(req: NextRequest) {
       return successResponse({ labels: [] })
     }
 
-    // Find matching labels using AI (mock for now)
-    const suggestedLabels = await findMatchingLabels(
-      body.title,
-      body.description,
-      labels
+    // Find matching labels using OpenAI
+    const availableLabels = labels.map((l) => ({ id: l.id, name: l.name }))
+    const suggestedLabelNames = await suggestLabels(body.title, body.description, availableLabels)
+
+    // Find matching labels by name
+    const suggestedLabels = labels.filter((l) =>
+      suggestedLabelNames.some((name) => name.toLowerCase() === l.name.toLowerCase())
     )
 
     // Return max 3 labels
@@ -81,27 +84,5 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     return handleApiError(error)
   }
-}
-
-async function findMatchingLabels(
-  title: string,
-  description: string | null,
-  labels: any[]
-): Promise<any[]> {
-  // TODO: Replace with actual AI API call
-  // Mock implementation - simple keyword matching
-  const text = `${title} ${description || ""}`.toLowerCase()
-  
-  const matches = labels.filter((label) => {
-    const labelName = label.name.toLowerCase()
-    return text.includes(labelName) || labelName.includes(text.split(" ")[0])
-  })
-
-  // If no matches, return first 2 labels as suggestions
-  if (matches.length === 0 && labels.length > 0) {
-    return labels.slice(0, 2)
-  }
-
-  return matches
 }
 

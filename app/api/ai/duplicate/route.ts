@@ -4,6 +4,7 @@ import { IssueVM, Label } from "@/src/schemas"
 import { requireAuth } from "@/lib/api/auth"
 import { successResponse, handleApiError, errorResponse } from "@/lib/api/response"
 import { checkAIRateLimit } from "../rate-limit"
+import { detectDuplicates } from "@/lib/openai"
 
 const DuplicateBody = z.object({
   projectId: z.string().uuid(),
@@ -144,26 +145,17 @@ async function findSimilarIssues(
   description: string | null,
   issues: any[]
 ): Promise<any[]> {
-  // TODO: Replace with actual AI API call (embeddings comparison)
-  // Mock implementation - simple word overlap
-  const words = new Set(
-    `${title} ${description || ""}`
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 3)
-  )
+  // Use OpenAI to find similar issues
+  const existingIssues = issues.map((i) => ({
+    id: i.id,
+    title: i.title,
+    description: i.description,
+  }))
 
-  const scored = issues.map((issue) => {
-    const issueWords = `${issue.title} ${issue.description || ""}`
-      .toLowerCase()
-      .split(/\s+/)
-    const overlap = issueWords.filter((w) => words.has(w)).length
-    return { issue, score: overlap }
-  })
-
-  return scored
-    .filter((s) => s.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .map((s) => s.issue)
+  const duplicates = await detectDuplicates(title, description, existingIssues)
+  
+  // Map the duplicate IDs back to the full issue objects
+  const duplicateIds = new Set(duplicates.map((d) => d.id))
+  return issues.filter((i) => duplicateIds.has(i.id))
 }
 

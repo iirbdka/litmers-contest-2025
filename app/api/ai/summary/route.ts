@@ -4,10 +4,12 @@ import { LIMITS } from "@/src/schemas/validators"
 import { requireAuth } from "@/lib/api/auth"
 import { successResponse, handleApiError, errorResponse } from "@/lib/api/response"
 import { checkAIRateLimit } from "../rate-limit"
+import { generateIssueSummary } from "@/lib/openai"
 
 const SummaryBody = z.object({
   issueId: z.string().uuid(),
   description: z.string(),
+  regenerate: z.boolean().optional(),
 })
 
 // POST /api/ai/summary - Generate AI summary (FR-040)
@@ -19,7 +21,7 @@ export async function POST(req: NextRequest) {
     // Check description length (minimum 10 chars)
     if (body.description.length < LIMITS.AI_MIN_DESCRIPTION_LENGTH) {
       return errorResponse(
-        `Description must be at least ${LIMITS.AI_MIN_DESCRIPTION_LENGTH} characters`,
+        `설명은 최소 ${LIMITS.AI_MIN_DESCRIPTION_LENGTH}자 이상이어야 합니다`,
         400
       )
     }
@@ -56,14 +58,13 @@ export async function POST(req: NextRequest) {
       return errorResponse("Forbidden", 403)
     }
 
-    // Return cached summary if available
-    if (issue.ai_summary) {
+    // Return cached summary if available (unless regenerate is requested)
+    if (issue.ai_summary && !body.regenerate) {
       return successResponse({ summary: issue.ai_summary, cached: true })
     }
 
-    // Generate summary using AI (mock for now, replace with actual AI call)
-    // In production, call OpenAI/Anthropic API here
-    const summary = await generateSummary(body.description)
+    // Generate summary using OpenAI
+    const summary = await generateIssueSummary(body.description)
 
     // Cache the result
     await supabase
@@ -75,26 +76,5 @@ export async function POST(req: NextRequest) {
   } catch (error) {
     return handleApiError(error)
   }
-}
-
-async function generateSummary(description: string): Promise<string> {
-  // TODO: Replace with actual AI API call
-  // Example with OpenAI:
-  // const response = await openai.chat.completions.create({
-  //   model: "gpt-4",
-  //   messages: [
-  //     { role: "system", content: "Summarize the following issue description in 2-4 sentences." },
-  //     { role: "user", content: description }
-  //   ],
-  //   max_tokens: 200
-  // })
-  // return response.choices[0].message.content
-
-  // Mock implementation
-  const sentences = description.split(/[.!?]+/).filter((s) => s.trim())
-  if (sentences.length <= 2) {
-    return description.trim()
-  }
-  return sentences.slice(0, 2).join(". ").trim() + "."
 }
 
